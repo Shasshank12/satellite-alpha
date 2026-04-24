@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<title>Satellite Alpha — Multi-Agent Hedge Fund</title>
+<title>WOUND IQ — Multi-Agent Clinical Decision Support</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -41,6 +41,27 @@
 const { useState, useEffect, useRef } = React;
 
 const API = "http://localhost:8000";
+
+function imageUrl(path) {
+  if (!path) return "";
+  const name = path.split("/").pop();
+  return `${API}/images/${name}`;
+}
+
+function avgGranulation(items) {
+  if (!items || !items.length) return 0;
+  const total = items.reduce((sum, item) => {
+    const g = item?.tissue_composition_pct?.granulation || 0;
+    return sum + g;
+  }, 0);
+  return Math.round(total / items.length);
+}
+
+function trajectoryArrow(trajectory) {
+  if (trajectory === "improving") return "↗";
+  if (trajectory === "deteriorating") return "↘";
+  return "→";
+}
 
 // ─────────────── UI: Agent card ───────────────
 function AgentCard({ name, title, status, summary }) {
@@ -81,22 +102,30 @@ function AgentCard({ name, title, status, summary }) {
 }
 
 // ─────────────── UI: Signal result panels ───────────────
-function VisionPanel({ data }) {
+function WoundVisionPanel({ data }) {
   if (!data) return null;
-  const totalCars = data.reduce((s, d) => s + d.car_count, 0);
-  const avgFill = (data.reduce((s, d) => s + d.fill_rate, 0) / data.length * 100).toFixed(0);
+
   return (
     <div className="fade-in space-y-3">
       <div className="flex gap-4 mono text-xs">
-        <div><span className="text-zinc-500">cars observed:</span> <span className="text-emerald-400">{totalCars}</span></div>
-        <div><span className="text-zinc-500">avg fill rate:</span> <span className="text-emerald-400">{avgFill}%</span></div>
+        <div><span className="text-zinc-500">images:</span> <span className="text-emerald-400">{data.length}</span></div>
+        <div><span className="text-zinc-500">avg granulation:</span> <span className="text-emerald-400">{avgGranulation(data)}%</span></div>
       </div>
       <div className="grid grid-cols-4 gap-2">
         {data.map((d, i) => (
-          <div key={i} className="rounded border border-zinc-800 bg-zinc-950/60 p-2">
-            <div className="mono text-[10px] text-zinc-500 mb-1">{d.date.split("(")[0].trim()}</div>
-            <div className="text-2xl font-bold text-emerald-400">{d.car_count}</div>
-            <div className="mono text-[10px] text-zinc-600">{(d.fill_rate * 100).toFixed(0)}% fill</div>
+          <div key={i} className="rounded border border-zinc-800 bg-zinc-950/60 overflow-hidden">
+            <div className="relative">
+              <img src={imageUrl(d.image_path)} className="w-full h-24 object-cover opacity-90" alt={`wound-${i}`} />
+              <div className="absolute bottom-0 left-0 right-0 bg-black/70 p-1.5 mono text-[10px] leading-tight">
+                <div className="text-emerald-400">
+                  {d?.estimated_dimensions_mm?.length || "?"} x {d?.estimated_dimensions_mm?.width || "?"} mm
+                </div>
+                <div className="text-zinc-300">
+                  granulation {d?.tissue_composition_pct?.granulation ?? "?"}%
+                </div>
+              </div>
+            </div>
+            <div className="p-2 mono text-[10px] text-zinc-500">{d.date}</div>
           </div>
         ))}
       </div>
@@ -104,159 +133,188 @@ function VisionPanel({ data }) {
   );
 }
 
-function TrendsPanel({ data }) {
+function TrendPanel({ data }) {
   if (!data) return null;
-  const dir = data.trend_direction;
-  const color = dir === "rising" ? "text-emerald-400" : dir === "declining" ? "text-red-400" : "text-amber-400";
+  const trajectory = data.trajectory;
+  const color = trajectory === "improving"
+    ? "text-emerald-400"
+    : trajectory === "deteriorating"
+    ? "text-red-400"
+    : "text-amber-400";
+
   return (
     <div className="fade-in space-y-2 text-sm">
-      <div><span className="text-zinc-500">direction:</span> <span className={`uppercase mono ${color}`}>{dir}</span></div>
-      <div><span className="text-zinc-500">YoY:</span> <span className={color}>{data.yoy_change_pct > 0 ? "+" : ""}{data.yoy_change_pct}%</span></div>
-      <div><span className="text-zinc-500">QoQ:</span> <span className={color}>{data.qoq_change_pct > 0 ? "+" : ""}{data.qoq_change_pct}%</span></div>
-      <div className="text-zinc-400 italic text-xs mt-2">"{data.interpretation}"</div>
+      <div className="text-2xl font-bold">
+        <span className={color}>{trajectoryArrow(trajectory)} {trajectory?.toUpperCase()}</span>
+      </div>
+      <div><span className="text-zinc-500">size change:</span> <span className={data.size_change_pct <= 0 ? "text-emerald-400" : "text-red-400"}>{data.size_change_pct > 0 ? "+" : ""}{data.size_change_pct}%</span></div>
+      <div><span className="text-zinc-500">granulation shift:</span> <span className={data.granulation_change_pct >= 0 ? "text-emerald-400" : "text-red-400"}>{data.granulation_change_pct > 0 ? "+" : ""}{data.granulation_change_pct}%</span></div>
+      <div><span className="text-zinc-500">infection signal:</span> <span className="mono uppercase text-amber-300">{data.infection_signal_change}</span></div>
+      {data.concerning_changes?.length > 0 && (
+        <div className="text-xs text-red-300 mt-2">
+          {data.concerning_changes[0]}
+        </div>
+      )}
     </div>
   );
 }
 
-function ContextPanel({ data }) {
+function riskColor(level) {
+  if (level === "low") return "#22c55e";
+  if (level === "moderate") return "#f59e0b";
+  if (level === "high") return "#f97316";
+  return "#ef4444";
+}
+
+function RiskPanel({ data }) {
   if (!data) return null;
+  const score = Math.max(0, Math.min(1, data.infection_risk_score || 0));
+  const pct = Math.round(score * 100);
+  const color = riskColor(data.infection_risk_level);
+  const gaugeStyle = {
+    background: `conic-gradient(${color} ${pct}%, #27272a ${pct}% 100%)`,
+  };
+
   return (
-    <div className="fade-in space-y-2 text-sm">
-      <div><span className="text-zinc-500">street expects SSS:</span> <span className="text-amber-400">+{data.consensus_ss_sales_growth_pct}%</span></div>
-      <div><span className="text-zinc-500">implied move:</span> <span className="mono">±{data.implied_move_pct}%</span></div>
-      <div><span className="text-zinc-500">setup:</span> <span className="mono uppercase">{data.setup}</span></div>
-      <div className="text-xs text-zinc-500 mt-2">bull: <span className="text-zinc-300">{data.bull_points?.[0]}</span></div>
-      <div className="text-xs text-zinc-500">bear: <span className="text-zinc-300">{data.bear_points?.[0]}</span></div>
+    <div className="fade-in space-y-3 text-sm">
+      <div className="flex items-center gap-3">
+        <div className="h-16 w-16 rounded-full p-1" style={gaugeStyle}>
+          <div className="h-full w-full rounded-full bg-zinc-950 flex items-center justify-center mono text-xs">
+            {score.toFixed(2)}
+          </div>
+        </div>
+        <div>
+          <div className="text-zinc-500">risk level</div>
+          <div className="mono uppercase font-bold" style={{ color }}>{data.infection_risk_level}</div>
+          <div className="text-zinc-400 text-xs">{data.complication_likelihood} complication likelihood</div>
+        </div>
+      </div>
+      <div>
+        <div className="mono text-[10px] text-zinc-500 uppercase mb-1">risk factors</div>
+        <ul className="text-xs text-zinc-300 space-y-1">
+          {(data.risk_factors || []).slice(0, 4).map((r, i) => <li key={i}>• {r}</li>)}
+        </ul>
+      </div>
     </div>
   );
 }
 
-// ─────────────── UI: Final thesis card ───────────────
-function ThesisCard({ thesis }) {
-  if (!thesis) return null;
-  const isLong = thesis.direction === "LONG";
-  const isShort = thesis.direction === "SHORT";
-  const dirClass = isLong
-    ? "border-emerald-500 bg-emerald-500/10 glow-green"
-    : isShort
-    ? "border-red-500 bg-red-500/10 glow-red"
-    : "border-amber-500 bg-amber-500/10";
+function escalationClass(level) {
+  if (level === "CONTINUE_HOME_CARE") return "border-emerald-500 bg-emerald-500/10 glow-green";
+  if (level === "CALL_NURSE_24H") return "border-amber-500 bg-amber-500/10";
+  if (level === "URGENT_CLINICIAN_SAME_DAY") return "border-orange-500 bg-orange-500/10";
+  return "border-red-500 bg-red-500/10 glow-red";
+}
+
+// ─────────────── UI: Care plan card ───────────────
+function CarePlanCard({ care }) {
+  if (!care) return null;
 
   return (
-    <div className={`fade-in rounded-xl border-2 ${dirClass} p-6`}>
+    <div className={`fade-in rounded-xl border-2 ${escalationClass(care.escalation_level)} p-6`}>
       <div className="flex items-start justify-between mb-4">
         <div>
-          <div className="mono text-xs text-zinc-500 uppercase tracking-widest mb-1">trade thesis</div>
-          <div className="text-3xl font-extrabold">
-            <span className={isLong ? "text-emerald-400" : isShort ? "text-red-400" : "text-amber-400"}>
-              {thesis.direction}
-            </span>
-            <span className="text-zinc-300"> {thesis.ticker}</span>
+          <div className="mono text-xs text-zinc-500 uppercase tracking-widest mb-1">care plan</div>
+          <div className="text-3xl font-extrabold text-zinc-100">{care.escalation_level}</div>
+        </div>
+        <div className="mono text-xs uppercase tracking-wider text-zinc-400">decision support only</div>
+      </div>
+
+      <div className="text-zinc-100 text-xl font-semibold mb-5">{care.headline}</div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
+        <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-4">
+          <div className="mono text-xs text-zinc-500 uppercase mb-2">today's care</div>
+          <ul className="space-y-1.5 text-sm text-zinc-200">
+            {(care.today_actions || []).map((a, i) => <li key={i}>• {a}</li>)}
+          </ul>
+        </div>
+        <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-4">
+          <div className="mono text-xs text-zinc-500 uppercase mb-2">watch for</div>
+          <ul className="space-y-1.5 text-sm text-zinc-200">
+            {(care.watch_for || []).map((w, i) => <li key={i}>• {w}</li>)}
+          </ul>
+        </div>
+      </div>
+
+      <div className="rounded-md border border-blue-500/30 bg-blue-500/5 p-4 mb-5">
+        <div className="mono text-xs text-blue-300 uppercase mb-1">plain-english explanation</div>
+        <div className="text-sm text-zinc-100 leading-relaxed">{care.explanation}</div>
+      </div>
+
+      <details className="mb-5 rounded border border-zinc-800 bg-zinc-950/50 p-3">
+        <summary className="mono text-xs uppercase text-zinc-400 cursor-pointer">clinical summary</summary>
+        <p className="text-sm text-zinc-200 mt-3 leading-relaxed">{care.clinical_summary}</p>
+      </details>
+
+      <div className="space-y-1.5">
+        <div className="mono text-xs text-zinc-500 uppercase">citations</div>
+        {(care.citations || []).map((c, i) => (
+          <div key={i} className="flex gap-3 text-sm">
+            <span className="mono text-[10px] uppercase text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded whitespace-nowrap h-fit mt-0.5">{c.signal}</span>
+            <span className="text-zinc-300">{c.claim}</span>
           </div>
-        </div>
-        <div className="text-right">
-          <div className="mono text-xs text-zinc-500">conviction</div>
-          <div className="font-bold text-xl">{thesis.conviction}</div>
-        </div>
-      </div>
-
-      <div className="text-zinc-200 leading-relaxed mb-6">{thesis.thesis}</div>
-
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-        <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
-          <div className="mono text-[10px] text-zinc-500 uppercase mb-1">our SSS forecast</div>
-          <div className="text-xl font-bold text-emerald-400">+{thesis.predicted_ss_sales_growth_pct}%</div>
-        </div>
-        <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
-          <div className="mono text-[10px] text-zinc-500 uppercase mb-1">vs consensus</div>
-          <div className={`text-xl font-bold ${thesis.vs_consensus_bps >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-            {thesis.vs_consensus_bps >= 0 ? "+" : ""}{thesis.vs_consensus_bps} bps
-          </div>
-        </div>
-        <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
-          <div className="mono text-[10px] text-zinc-500 uppercase mb-1">expected move / beat</div>
-          <div className="text-xl font-bold text-emerald-400">+{thesis.expected_stock_move_on_beat_pct}%</div>
-        </div>
-        <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
-          <div className="mono text-[10px] text-zinc-500 uppercase mb-1">expected move / miss</div>
-          <div className="text-xl font-bold text-red-400">{thesis.expected_stock_move_on_miss_pct}%</div>
-        </div>
-      </div>
-
-      <div className="mb-4">
-        <div className="mono text-xs text-zinc-500 uppercase mb-2">signal attribution</div>
-        <div className="space-y-1.5">
-          {thesis.citations?.map((c, i) => (
-            <div key={i} className="flex gap-3 text-sm">
-              <span className="mono text-[10px] uppercase text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded whitespace-nowrap h-fit mt-0.5">{c.signal}</span>
-              <span className="text-zinc-300">{c.claim}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div className="flex items-center justify-between border-t border-zinc-800 pt-3 text-xs">
-        <div><span className="text-zinc-500">signal agreement:</span> <span className="mono text-zinc-300">{thesis.signal_agreement}</span></div>
-        <div><span className="text-zinc-500">alpha source:</span> <span className="mono text-zinc-300">{thesis.alpha_source}</span></div>
+        ))}
       </div>
     </div>
   );
 }
 
-// ─────────────── UI: Reveal (mic drop) ───────────────
-function RevealCard({ outcome }) {
+// ─────────────── UI: Outcome (mic drop) ───────────────
+function OutcomeCard({ outcome }) {
   if (!outcome) return null;
-  const beat = outcome.beat_consensus_sss && outcome.beat_consensus_eps;
+
   return (
     <div className="fade-in rounded-xl border-2 border-amber-500/70 bg-gradient-to-br from-amber-500/10 to-orange-500/5 p-6 mt-6">
       <div className="mono text-xs uppercase tracking-widest text-amber-400 mb-2">what actually happened</div>
-      <div className="grid grid-cols-3 gap-4 mb-4">
+      <div className="text-sm text-zinc-200 leading-relaxed mb-5">{outcome.what_happened}</div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
         <div>
-          <div className="mono text-[10px] text-zinc-500 uppercase mb-1">reported SSS</div>
-          <div className="text-2xl font-bold">+{outcome.reported_ss_sales_growth_pct}%</div>
+          <div className="mono text-[10px] text-zinc-500 uppercase mb-1">days earlier our system flagged this</div>
+          <div className="text-3xl font-extrabold text-amber-300">{outcome.days_earlier_flagged}</div>
         </div>
         <div>
-          <div className="mono text-[10px] text-zinc-500 uppercase mb-1">reported EPS</div>
-          <div className="text-2xl font-bold">${outcome.reported_eps}</div>
+          <div className="mono text-[10px] text-zinc-500 uppercase mb-1">impact</div>
+          <div className="text-sm text-zinc-200">{outcome.outcome_with_early_intervention}</div>
         </div>
         <div>
-          <div className="mono text-[10px] text-zinc-500 uppercase mb-1">vs consensus</div>
-          <div className={`text-2xl font-bold ${beat ? "text-emerald-400" : "text-red-400"}`}>
-            {beat ? "BEAT" : "MISS"}
-          </div>
+          <div className="mono text-[10px] text-zinc-500 uppercase mb-1">statistical context</div>
+          <div className="text-sm text-zinc-200">{outcome.statistical_context}</div>
         </div>
       </div>
-      <div className="text-sm text-zinc-300 leading-relaxed">{outcome.note}</div>
+
+      <div className="mono text-[11px] uppercase text-zinc-500">{outcome.disclaimer}</div>
     </div>
   );
 }
 
 // ─────────────── Main app ───────────────
 function App() {
-  const [ticker, setTicker] = useState("COST");
+  const [patientId, setPatientId] = useState("DEMO-001");
   const [running, setRunning] = useState(false);
   const [agents, setAgents] = useState({
     vision:      { status: "pending", data: null },
-    trends:      { status: "pending", data: null },
-    context:     { status: "pending", data: null },
-    synthesizer: { status: "pending", data: null },
+    trend:       { status: "pending", data: null },
+    risk:        { status: "pending", data: null },
+    care:        { status: "pending", data: null },
   });
-  const [thesis, setThesis] = useState(null);
+  const [care, setCare] = useState(null);
   const [outcome, setOutcome] = useState(null);
 
   const run = async () => {
     setRunning(true);
-    setThesis(null);
+    setCare(null);
     setOutcome(null);
     setAgents({
       vision:      { status: "pending", data: null },
-      trends:      { status: "pending", data: null },
-      context:     { status: "pending", data: null },
-      synthesizer: { status: "pending", data: null },
+      trend:       { status: "pending", data: null },
+      risk:        { status: "pending", data: null },
+      care:        { status: "pending", data: null },
     });
 
     const form = new FormData();
-    form.append("ticker", ticker);
+    form.append("patient_id", patientId);
     form.append("use_demo", "true");
 
     const res = await fetch(`${API}/analyze`, { method: "POST", body: form });
@@ -278,7 +336,7 @@ function App() {
         if (update.step === "start") continue;
 
         if (update.step === "complete") {
-          setThesis(update.data.thesis);
+          setCare(update.data.care);
           setRunning(false);
           continue;
         }
@@ -292,7 +350,7 @@ function App() {
   };
 
   const reveal = async () => {
-    const res = await fetch(`${API}/reveal/${ticker}`);
+    const res = await fetch(`${API}/reveal/${patientId}`);
     setOutcome(await res.json());
   };
 
@@ -303,17 +361,21 @@ function App() {
         <div>
           <div className="flex items-center gap-3 mb-1">
             <div className="mono text-xs uppercase tracking-widest text-emerald-400">◉ live</div>
-            <h1 className="text-2xl font-extrabold tracking-tight">SATELLITE ALPHA</h1>
+            <h1 className="text-2xl font-extrabold tracking-tight">WOUND IQ</h1>
           </div>
           <div className="mono text-xs text-zinc-500">
-            multi-agent alternative data → equity thesis · claude opus 4.7
+            multi-agent clinical decision support · claude opus 4.7
+          </div>
+          <div className="mono text-[10px] text-zinc-600 mt-1 uppercase tracking-wider">
+            decision support - not a diagnosis
           </div>
         </div>
         <div className="flex items-center gap-3">
           <input
-            value={ticker}
-            onChange={(e) => setTicker(e.target.value.toUpperCase())}
-            className="mono bg-zinc-900 border border-zinc-700 rounded px-3 py-2 w-24 text-center font-bold"
+            value={patientId}
+            onChange={(e) => setPatientId(e.target.value.toUpperCase())}
+            className="mono bg-zinc-900 border border-zinc-700 rounded px-3 py-2 w-36 text-center font-bold"
+            aria-label="PATIENT_ID"
           />
           <button
             onClick={run}
@@ -329,19 +391,19 @@ function App() {
       <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-6">
         <AgentCard
           name="agent-01" title="Vision Analyst" status={agents.vision.status}
-          summary={agents.vision.data ? `${agents.vision.data.reduce((s,d)=>s+d.car_count,0)} cars across ${agents.vision.data.length} scans` : ""}
+          summary={agents.vision.data ? `${agents.vision.data.length} images analyzed · ${avgGranulation(agents.vision.data)}% granulation` : ""}
         />
         <AgentCard
-          name="agent-02" title="Digital Demand" status={agents.trends.status}
-          summary={agents.trends.data ? `${agents.trends.data.trend_direction.toUpperCase()} · YoY ${agents.trends.data.yoy_change_pct > 0 ? "+" : ""}${agents.trends.data.yoy_change_pct}%` : ""}
+          name="agent-02" title="Trend Tracker" status={agents.trend.status}
+          summary={agents.trend.data ? `${agents.trend.data.trajectory} · size ${agents.trend.data.size_change_pct > 0 ? "+" : ""}${agents.trend.data.size_change_pct}%` : ""}
         />
         <AgentCard
-          name="agent-03" title="Equity Research" status={agents.context.status}
-          summary={agents.context.data ? `street: +${agents.context.data.consensus_ss_sales_growth_pct}% · ${agents.context.data.setup}` : ""}
+          name="agent-03" title="Risk Engine" status={agents.risk.status}
+          summary={agents.risk.data ? `${agents.risk.data.infection_risk_level} · ${agents.risk.data.complication_likelihood} complications` : ""}
         />
         <AgentCard
-          name="agent-04" title="Portfolio Manager" status={agents.synthesizer.status}
-          summary={agents.synthesizer.data ? `thesis ready` : ""}
+          name="agent-04" title="Care Coordinator" status={agents.care.status}
+          summary={agents.care.data ? "care plan ready" : ""}
         />
       </div>
 
@@ -349,42 +411,42 @@ function App() {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-8">
         <div className="rounded-lg border border-zinc-800 bg-zinc-900/30 p-4">
           <div className="mono text-xs text-zinc-500 uppercase mb-3">vision</div>
-          <VisionPanel data={agents.vision.data} />
+          <WoundVisionPanel data={agents.vision.data} />
         </div>
         <div className="rounded-lg border border-zinc-800 bg-zinc-900/30 p-4">
-          <div className="mono text-xs text-zinc-500 uppercase mb-3">trends</div>
-          <TrendsPanel data={agents.trends.data} />
+          <div className="mono text-xs text-zinc-500 uppercase mb-3">trend</div>
+          <TrendPanel data={agents.trend.data} />
         </div>
         <div className="rounded-lg border border-zinc-800 bg-zinc-900/30 p-4">
-          <div className="mono text-xs text-zinc-500 uppercase mb-3">fundamentals</div>
-          <ContextPanel data={agents.context.data} />
+          <div className="mono text-xs text-zinc-500 uppercase mb-3">risk</div>
+          <RiskPanel data={agents.risk.data} />
         </div>
       </div>
 
-      {/* Thesis */}
-      {thesis && (
+      {/* Care */}
+      {care && (
         <>
-          <ThesisCard thesis={thesis} />
+          <CarePlanCard care={care} />
           {!outcome && (
             <div className="text-center mt-6">
               <button
                 onClick={reveal}
                 className="bg-amber-500 hover:bg-amber-400 text-black font-bold px-6 py-3 rounded transition-colors"
               >
-                🎯 reveal actual outcome
+                REVEAL OUTCOME
               </button>
             </div>
           )}
-          <RevealCard outcome={outcome} />
+          <OutcomeCard outcome={outcome} />
         </>
       )}
 
       {/* Empty state */}
-      {!thesis && !running && (
+      {!care && !running && (
         <div className="text-center py-16 text-zinc-600">
-          <div className="text-5xl mb-4">🛰️</div>
-          <div className="mono text-xs uppercase tracking-widest mb-2">pipeline idle</div>
-          <div className="text-sm">enter a ticker and run the analysis</div>
+          <div className="text-5xl mb-4">🩺</div>
+          <div className="mono text-xs uppercase tracking-widest mb-2">scan idle</div>
+          <div className="text-sm">submit patient ID to begin assessment</div>
         </div>
       )}
     </div>

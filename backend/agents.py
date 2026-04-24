@@ -1,8 +1,8 @@
 """
-SATELLITE ALPHA — Multi-agent hedge fund in a box.
+WOUND IQ — Multi-agent clinical decision support pipeline.
 
 Each agent is a distinct Claude call with a specialized system prompt.
-They run in parallel where possible, then a synthesizer agent reconciles.
+They run in stages with explicit dependencies, then a care agent synthesizes.
 """
 
 from __future__ import annotations
@@ -10,55 +10,62 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 from anthropic import AsyncAnthropic
 
-load_dotenv(Path(__file__).parent.parent / ".env")
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 MODEL = "claude-opus-4-7"
 client = AsyncAnthropic()
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# AGENT 1 — VISION AGENT: Counts cars in parking lot images
+# AGENT 1 — WOUND VISION AGENT
 # ──────────────────────────────────────────────────────────────────────────
 
-VISION_SYSTEM = """You are a satellite imagery analyst specializing in retail foot traffic.
-Your job: examine aerial/satellite images of parking lots and count vehicles accurately.
+VISION_SYSTEM = """You are a wound imaging analyst specializing in chronic wound visual assessment.
+You are clinical decision support, not a diagnosis. Your output augments — does not replace — clinician judgment.
 
-For each image, output STRICT JSON:
+Your task: evaluate each wound image and return STRICT JSON with this shape:
 {
-  "car_count": <integer>,
-  "lot_capacity_estimate": <integer>,
-  "fill_rate": <float 0-1>,
-  "weather_visible": "<clear|overcast|snow|rain|unclear>",
-  "time_of_day_estimate": "<morning|midday|afternoon|evening|unclear>",
-  "anomalies": ["<construction>", "<event>", ...],
-  "confidence": <float 0-1>
+    "estimated_dimensions_mm": {"length": <int>, "width": <int>, "depth_estimate": "<superficial|partial-thickness|full-thickness|unable-to-assess>"},
+    "tissue_composition_pct": {"granulation": <int>, "slough": <int>, "eschar": <int>, "epithelial": <int>},
+    "wound_bed_color": "<red|pink|yellow|black|mixed>",
+    "exudate": {"amount": "<none|minimal|moderate|heavy>", "type": "<serous|sanguinous|purulent|unclear>"},
+    "periwound_skin": {"erythema_present": <bool>, "edema_present": <bool>, "maceration_present": <bool>, "redness_extent_mm": <int>},
+    "infection_indicators": ["<indicator>", ...],
+    "image_quality": "<good|adequate|poor>",
+    "confidence": <float 0-1>,
+    "notes": "<brief clinical observation>"
 }
 
-Count carefully. A single row of cars is a line of roughly-rectangular shapes.
-If the lot is sparse, count every car. If dense, estimate by sections.
-Return ONLY the JSON, no preamble."""
+Rules:
+- Keep tissue percentages clinically plausible and summing approximately to 100.
+- If a field cannot be assessed from image quality/angle, still provide best estimate and mention uncertainty in notes.
+- Return ONLY JSON. No markdown. No preamble."""
 
 
-async def vision_agent(image_paths: list[str], dates: list[str]) -> list[dict]:
-    """Analyze each parking lot image. Runs all in parallel."""
+async def wound_vision_agent(image_paths: list[str], image_dates: list[str]) -> list[dict]:
+    """Analyze each wound image. Runs all images in parallel."""
+
+    def detect_media_type(image_bytes: bytes) -> str:
+        """Infer image MIME type from magic bytes, not filename extension."""
+        if image_bytes.startswith(b"\xFF\xD8\xFF"):
+            return "image/jpeg"
+        if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
+            return "image/webp"
+        return "image/jpeg"
 
     async def analyze_one(img_path: str, date: str) -> dict:
         with open(img_path, "rb") as f:
-            img_b64 = base64.standard_b64encode(f.read()).decode("utf-8")
-
-        # Infer media type from extension
-        ext = Path(img_path).suffix.lower()
-        media_type = {
-            ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-            ".png": "image/png", ".webp": "image/webp",
-        }.get(ext, "image/jpeg")
+            image_bytes = f.read()
+        img_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+        media_type = detect_media_type(image_bytes)
 
         response = await client.messages.create(
             model=MODEL,
@@ -77,7 +84,10 @@ async def vision_agent(image_paths: list[str], dates: list[str]) -> list[dict]:
                     },
                     {
                         "type": "text",
-                        "text": f"Image captured on {date}. Count the cars and return JSON.",
+                        "text": (
+                            f"Wound photo timestamp: {date}. "
+                            "Return the required wound assessment JSON only."
+                        ),
                     },
                 ],
             }],
@@ -94,44 +104,57 @@ async def vision_agent(image_paths: list[str], dates: list[str]) -> list[dict]:
         result["image_path"] = img_path
         return result
 
-    tasks = [analyze_one(p, d) for p, d in zip(image_paths, dates)]
+    tasks = [analyze_one(p, d) for p, d in zip(image_paths, image_dates)]
     return await asyncio.gather(*tasks)
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# AGENT 2 — TRENDS AGENT: Analyzes Google Trends for ticker/brand
+# AGENT 2 — TREND AGENT: Time-series wound trajectory
 # ──────────────────────────────────────────────────────────────────────────
 
-TRENDS_SYSTEM = """You are a digital demand analyst. Given Google search trend data for
-a retailer brand, identify the directional signal for consumer interest vs prior periods.
+TREND_SYSTEM = """You are a wound progression analyst reviewing serial wound observations.
+You are clinical decision support, not a diagnosis. Your output augments — does not replace — clinician judgment.
 
-Output STRICT JSON:
+Given per-image wound assessments across multiple days, output STRICT JSON:
 {
-  "trend_direction": "<rising|stable|declining>",
-  "yoy_change_pct": <float>,
-  "qoq_change_pct": <float>,
-  "signal_strength": <float 0-1>,
-  "notable_spikes": ["<description>", ...],
-  "interpretation": "<one sentence>"
+  "trajectory": "<improving|stable|deteriorating>",
+  "size_change_pct": <float>,
+  "granulation_change_pct": <float>,
+  "infection_signal_change": "<resolving|stable|emerging|worsening>",
+  "days_observed": <int>,
+  "key_findings": ["<finding>", ...],
+  "concerning_changes": ["<change>", ...]
 }
 
-Return ONLY the JSON."""
+Interpretation guidance:
+- Negative size_change_pct means wound shrinking (generally favorable).
+- Positive granulation_change_pct is generally favorable.
+- Account for both wound-bed biology and periwound infection indicators.
+- Return ONLY JSON."""
 
 
-async def trends_agent(ticker: str, brand: str, trends_data: dict) -> dict:
-    """Interpret Google Trends data for the brand."""
+async def trend_agent(
+    patient_id: str,
+    wound_type: str,
+    image_dates: list[str],
+    vision_results: list[dict],
+) -> dict:
+    """Analyze wound trajectory across serial image assessments."""
     response = await client.messages.create(
         model=MODEL,
         max_tokens=1024,
-        system=TRENDS_SYSTEM,
+        system=TREND_SYSTEM,
         messages=[{
             "role": "user",
-            "content": f"""Ticker: {ticker}
-Brand: {brand}
-Google Trends data (weekly search interest, scale 0-100):
-{json.dumps(trends_data, indent=2)}
+            "content": f"""Patient ID: {patient_id}
+Wound Type: {wound_type}
+Observation Dates:
+{json.dumps(image_dates, indent=2)}
 
-Analyze this and return JSON.""",
+Per-image wound vision outputs:
+{json.dumps(vision_results, indent=2)}
+
+Analyze trajectory and return the required JSON.""",
         }],
     )
     text = response.content[0].text.strip()
@@ -143,39 +166,53 @@ Analyze this and return JSON.""",
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# AGENT 3 — CONTEXT AGENT: Pulls fundamentals and street expectations
+# AGENT 3 — RISK AGENT: Infection + complication risk
 # ──────────────────────────────────────────────────────────────────────────
 
-CONTEXT_SYSTEM = """You are an equity research analyst. Given recent fundamentals and
-analyst consensus for a ticker, summarize the setup going into earnings.
+RISK_SYSTEM = """You are a clinical risk stratification analyst for chronic wound monitoring.
+You are clinical decision support, not a diagnosis. Your output augments — does not replace — clinician judgment.
 
-Output STRICT JSON:
+Given patient context, baseline wound metrics, and current visual findings, output STRICT JSON:
 {
-  "consensus_ss_sales_growth_pct": <float>,
-  "consensus_eps": <float>,
-  "recent_price_performance_90d_pct": <float>,
-  "implied_move_pct": <float>,
-  "bull_points": ["<point>", ...],
-  "bear_points": ["<point>", ...],
-  "setup": "<long|neutral|short>"
+  "infection_risk_score": <float 0-1>,
+  "infection_risk_level": "<low|moderate|high|critical>",
+  "complication_likelihood": "<low|moderate|high>",
+  "estimated_days_to_heal": <int or null>,
+  "risk_factors": ["<factor>", ...],
+  "protective_factors": ["<factor>", ...],
+  "rationale": "<2-sentence clinical reasoning>"
 }
 
-Return ONLY the JSON."""
+Use conservative reasoning when uncertainty is high and mention uncertainty in rationale.
+Return ONLY JSON."""
 
 
-async def context_agent(ticker: str, fundamentals: dict) -> dict:
-    """Analyze fundamentals + street setup."""
+async def risk_agent(
+    patient_id: str,
+    wound_type: str,
+    patient_context: dict,
+    baseline_metrics: dict,
+    vision_results: list[dict],
+) -> dict:
+    """Estimate infection and complication risk from context plus visual signals."""
     response = await client.messages.create(
         model=MODEL,
         max_tokens=1024,
-        system=CONTEXT_SYSTEM,
+        system=RISK_SYSTEM,
         messages=[{
             "role": "user",
-            "content": f"""Ticker: {ticker}
-Fundamentals and analyst data:
-{json.dumps(fundamentals, indent=2)}
+            "content": f"""Patient ID: {patient_id}
+Wound Type: {wound_type}
+Patient Context:
+{json.dumps(patient_context, indent=2)}
 
-Return JSON analysis.""",
+Baseline Metrics:
+{json.dumps(baseline_metrics, indent=2)}
+
+Latest Serial Visual Findings:
+{json.dumps(vision_results, indent=2)}
+
+Return the risk JSON.""",
         }],
     )
     text = response.content[0].text.strip()
@@ -187,86 +224,63 @@ Return JSON analysis.""",
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# AGENT 4 — SYNTHESIZER: Reconciles all signals into a trade thesis
+# AGENT 4 — CARE AGENT: Synthesizes into daily care + escalation
 # ──────────────────────────────────────────────────────────────────────────
 
-SYNTHESIZER_SYSTEM = """You are a portfolio manager at an alternative-data hedge fund.
-You receive signals from three analysts:
-  1. A vision analyst who counted cars in parking lots across time
-  2. A digital demand analyst interpreting Google search trends
-  3. An equity research analyst with fundamentals and street expectations
+CARE_SYSTEM = """You are a wound care coordination assistant for home-care and clinic follow-up.
+You are clinical decision support, not a diagnosis. Your output augments — does not replace — clinician judgment.
 
-Your job: reconcile these into a single trade thesis with REAL conviction.
-
-Consider:
-- Do the alternative data signals (cars + trends) AGREE with each other?
-- Do they DIVERGE from what Wall Street expects? (This is where alpha lives.)
-- What is the asymmetric setup — how much upside on a beat vs downside on a miss?
+Synthesize vision findings, trajectory analysis, and risk stratification into caregiver-safe guidance.
 
 Output STRICT JSON:
 {
-  "ticker": "<ticker>",
-  "thesis": "<2-3 sentence trade thesis in portfolio-manager voice>",
-  "direction": "<LONG|SHORT|NEUTRAL>",
-  "conviction": "<LOW|MEDIUM|HIGH>",
-  "predicted_ss_sales_growth_pct": <float>,
-  "vs_consensus_bps": <integer — positive = we're above street>,
-  "expected_stock_move_on_beat_pct": <float>,
-  "expected_stock_move_on_miss_pct": <float>,
-  "key_risks": ["<risk>", ...],
-  "signal_agreement": "<all agree|mixed|diverging>",
-  "alpha_source": "<which signal is doing the most work>",
+  "escalation_level": "<CONTINUE_HOME_CARE|CALL_NURSE_24H|URGENT_CLINICIAN_SAME_DAY|ER_NOW>",
+  "headline": "<one-line summary in caregiver-friendly language>",
+  "today_actions": ["<action>", ...],
+  "watch_for": ["<warning sign>", ...],
+  "explanation": "<2-3 sentence plain-English explanation a non-medical person understands>",
+  "clinical_summary": "<1-paragraph summary in clinical language for the nurse/doctor>",
+  "confidence": "<LOW|MEDIUM|HIGH>",
   "citations": [
-     {"signal": "vision|trends|context", "claim": "<what it told us>"},
-     ...
+    {"signal": "vision|trend|risk", "claim": "<what the signal showed>"},
+    ...
   ]
 }
 
-Return ONLY the JSON. No preamble."""
+Return ONLY JSON."""
 
 
-async def synthesizer_agent(
-    ticker: str,
+async def care_agent(
+    patient_id: str,
+    wound_type: str,
+    patient_context: dict,
     vision_results: list[dict],
-    trends_result: dict,
-    context_result: dict,
+    trend_result: dict,
+    risk_result: dict,
 ) -> dict:
-    """Reconcile all signals into a trade thesis."""
-
-    # Compute traffic delta from vision results
-    if len(vision_results) >= 2:
-        early = sum(r["car_count"] for r in vision_results[:len(vision_results)//2])
-        late = sum(r["car_count"] for r in vision_results[len(vision_results)//2:])
-        traffic_delta_pct = ((late - early) / early * 100) if early else 0
-    else:
-        traffic_delta_pct = 0
-
-    vision_summary = {
-        "observations": vision_results,
-        "traffic_delta_pct_period_over_period": round(traffic_delta_pct, 1),
-        "mean_fill_rate": round(
-            sum(r["fill_rate"] for r in vision_results) / len(vision_results), 2
-        ) if vision_results else 0,
-    }
+    """Synthesize outputs into care guidance and escalation decision support."""
 
     response = await client.messages.create(
         model=MODEL,
         max_tokens=2048,
-        system=SYNTHESIZER_SYSTEM,
+        system=CARE_SYSTEM,
         messages=[{
             "role": "user",
-            "content": f"""TICKER: {ticker}
+            "content": f"""Patient ID: {patient_id}
+Wound Type: {wound_type}
+Patient Context:
+{json.dumps(patient_context, indent=2)}
 
-━━━ SIGNAL 1: PARKING LOT TRAFFIC (Vision Agent) ━━━
-{json.dumps(vision_summary, indent=2)}
+Vision Signal:
+{json.dumps(vision_results, indent=2)}
 
-━━━ SIGNAL 2: DIGITAL DEMAND (Trends Agent) ━━━
-{json.dumps(trends_result, indent=2)}
+Trend Signal:
+{json.dumps(trend_result, indent=2)}
 
-━━━ SIGNAL 3: FUNDAMENTALS & STREET (Context Agent) ━━━
-{json.dumps(context_result, indent=2)}
+Risk Signal:
+{json.dumps(risk_result, indent=2)}
 
-Reconcile these signals and output the trade thesis JSON.""",
+Return care synthesis JSON.""",
         }],
     )
     text = response.content[0].text.strip()
@@ -281,56 +295,63 @@ Reconcile these signals and output the trade thesis JSON.""",
 # ORCHESTRATOR — runs everything, streams progress
 # ──────────────────────────────────────────────────────────────────────────
 
-@dataclass
-class Signal:
-    name: str
-    status: str  # "pending" | "running" | "done" | "error"
-    data: Any = None
-
 
 async def run_pipeline(
-    ticker: str,
-    brand: str,
+    patient_id: str,
+    wound_type: str,
+    patient_context: dict,
     image_paths: list[str],
     image_dates: list[str],
-    trends_data: dict,
-    fundamentals: dict,
+    baseline_metrics: dict,
     progress_callback=None,
 ) -> dict:
-    """Run the full multi-agent pipeline with progress streaming."""
+    """Run the WOUND IQ pipeline with staged dependencies and progress streaming."""
 
     async def report(step: str, status: str, data=None):
         if progress_callback:
             await progress_callback({"step": step, "status": status, "data": data})
 
-    # Stage 1: Run three analysts in PARALLEL
+    # Stage 1: Vision over all images (parallel per-image within agent)
     await report("vision", "running")
-    await report("trends", "running")
-    await report("context", "running")
-
-    vision_task = vision_agent(image_paths, image_dates)
-    trends_task = trends_agent(ticker, brand, trends_data)
-    context_task = context_agent(ticker, fundamentals)
-
-    vision_results, trends_result, context_result = await asyncio.gather(
-        vision_task, trends_task, context_task
-    )
-
+    vision_results = await wound_vision_agent(image_paths, image_dates)
     await report("vision", "done", vision_results)
-    await report("trends", "done", trends_result)
-    await report("context", "done", context_result)
 
-    # Stage 2: Synthesizer
-    await report("synthesizer", "running")
-    thesis = await synthesizer_agent(
-        ticker, vision_results, trends_result, context_result
+    # Stage 2: Trend + risk in parallel (both depend on vision)
+    await report("trend", "running")
+    await report("risk", "running")
+
+    trend_task = trend_agent(patient_id, wound_type, image_dates, vision_results)
+    risk_task = risk_agent(
+        patient_id,
+        wound_type,
+        patient_context,
+        baseline_metrics,
+        vision_results,
     )
-    await report("synthesizer", "done", thesis)
+
+    trend_result, risk_result = await asyncio.gather(trend_task, risk_task)
+
+    await report("trend", "done", trend_result)
+    await report("risk", "done", risk_result)
+
+    # Stage 3: Care synthesis
+    await report("care", "running")
+    care = await care_agent(
+        patient_id,
+        wound_type,
+        patient_context,
+        vision_results,
+        trend_result,
+        risk_result,
+    )
+    await report("care", "done", care)
 
     return {
-        "ticker": ticker,
+        "patient_id": patient_id,
+        "wound_type": wound_type,
+        "patient_context": patient_context,
         "vision": vision_results,
-        "trends": trends_result,
-        "context": context_result,
-        "thesis": thesis,
+        "trend": trend_result,
+        "risk": risk_result,
+        "care": care,
     }

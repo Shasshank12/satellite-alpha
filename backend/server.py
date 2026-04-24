@@ -15,6 +15,8 @@ from fastapi.staticfiles import StaticFiles
 from agents import run_pipeline
 from demo_data import get_demo_package
 
+ROOT_DIR = Path(__file__).resolve().parent.parent
+
 app = FastAPI()
 
 app.add_middleware(
@@ -27,12 +29,12 @@ app.add_middleware(
 
 @app.get("/")
 async def root():
-    return {"status": "satellite-alpha online", "model": "claude-opus-4-7"}
+    return {"status": "wound-iq online", "model": "claude-opus-4-7"}
 
 
 @app.post("/analyze")
 async def analyze(
-    ticker: str = Form(...),
+    patient_id: str = Form(...),
     use_demo: bool = Form(True),
 ):
     """Run the multi-agent pipeline. Streams progress as SSE."""
@@ -44,19 +46,19 @@ async def analyze(
         async def progress(update):
             await queue.put(update)
 
-        # Load demo package (images, trends, fundamentals for the ticker)
-        demo = get_demo_package(ticker)
+        # Load demo package (images + patient context for the case)
+        demo = get_demo_package(patient_id)
 
         # Kick off pipeline in background
         async def run():
             try:
                 result = await run_pipeline(
-                    ticker=ticker,
-                    brand=demo["brand"],
+                    patient_id=patient_id,
+                    wound_type=demo["wound_type"],
+                    patient_context=demo["patient_context"],
                     image_paths=demo["image_paths"],
                     image_dates=demo["image_dates"],
-                    trends_data=demo["trends_data"],
-                    fundamentals=demo["fundamentals"],
+                    baseline_metrics=demo["baseline_metrics"],
                     progress_callback=progress,
                 )
                 await queue.put({"step": "complete", "status": "done", "data": result})
@@ -70,7 +72,7 @@ async def analyze(
         task = asyncio.create_task(run())
 
         # Stream events from queue
-        yield f"data: {json.dumps({'step': 'start', 'status': 'running', 'data': {'ticker': ticker, 'brand': demo['brand']}})}\n\n"
+        yield f"data: {json.dumps({'step': 'start', 'status': 'running', 'data': {'patient_id': patient_id, 'wound_type': demo['wound_type']}})}\n\n"
 
         while True:
             update = await queue.get()
@@ -83,17 +85,17 @@ async def analyze(
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-@app.get("/reveal/{ticker}")
-async def reveal(ticker: str):
+@app.get("/reveal/{patient_id}")
+async def reveal(patient_id: str):
     """Reveal what actually happened — the mic-drop moment."""
-    demo = get_demo_package(ticker)
+    demo = get_demo_package(patient_id)
     return demo["actual_outcome"]
 
 
 # Serve demo images
 app.mount(
     "/images",
-    StaticFiles(directory=str(Path(__file__).parent.parent / "data" / "images")),
+    StaticFiles(directory=str(ROOT_DIR / "data" / "images")),
     name="images",
 )
 

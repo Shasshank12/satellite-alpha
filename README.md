@@ -1,110 +1,113 @@
-# 🛰️ SATELLITE ALPHA
+# WOUND IQ
 
-**Multi-agent hedge fund in a box.** Four Claude agents consume satellite imagery, Google Trends, and fundamentals to predict earnings outcomes before Wall Street does.
+Multi-agent clinical decision support for chronic wound monitoring.
 
----
+Disclaimer: Decision support, not diagnosis. Outputs augment and do not replace clinician judgment.
 
-## 🎯 What it does
+## What It Does
 
-```
-Parking lot images  ─┐
-                     ├─→  [4 parallel Claude agents]  ─→  Trade thesis
-Google Trends data  ─┤          ↓                         (LONG/SHORT)
-                     │   [Synthesizer agent]               + conviction
-Fundamentals        ─┘                                     + citations
-```
+WOUND IQ analyzes serial wound photos and generates caregiver-safe escalation guidance.
 
-Each agent has a distinct role, runs in parallel, and feeds the synthesizer which outputs a portfolio-manager-grade trade thesis with signal attribution.
+Inputs:
 
----
+- 4 wound images over time
+- Patient context
+- Baseline wound metrics
 
-## ⚡ 5-minute setup
+Pipeline:
 
-### 1. Install
+- Vision Analyst: extracts dimensions, tissue mix, exudate, periwound flags, infection indicators
+- Trend Tracker: computes trajectory and signal change across days
+- Risk Engine: estimates infection/complication risk from context plus visual findings
+- Care Coordinator: synthesizes signals into today actions, watch-fors, and escalation level
+
+Output:
+
+- Escalation level: CONTINUE_HOME_CARE, CALL_NURSE_24H, URGENT_CLINICIAN_SAME_DAY, or ER_NOW
+- Plain-English instructions for caregiver + clinical summary for nurse/doctor
+
+## Quick Start
+
+1. Install dependencies:
 
 ```bash
 cd backend
 pip install -r requirements.txt
-export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-### 2. Drop in demo images
-
-Before running the demo, put 4 parking lot images in `data/images/` named:
-- `cost_week01.jpg` — early-quarter Costco parking lot, moderately filled
-- `cost_week05.jpg` — mid-quarter, slightly busier
-- `cost_week09.jpg` — late-quarter, getting busier
-- `cost_week12.jpg` — just before earnings, very busy
-
-**How to get them in 5 min:**
-1. Open Google Earth → any Costco location (e.g. 4849 San Felipe Rd, Houston)
-2. Use the historical imagery slider (📅 icon) to pick 4 dates across a quarter
-3. Screenshot each, save as `cost_weekNN.jpg`
-
-(Or use any aerial/drone images of progressively busier parking lots — the demo works on the pattern, not the specific location.)
-
-### 3. Run
+2. Create .env in project root:
 
 ```bash
-# Terminal 1: backend
-cd backend && python server.py
-
-# Terminal 2: frontend (any static server)
-cd frontend && python -m http.server 3000
+ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Open http://localhost:3000
+3. Add demo wound images to data/images:
 
-### 4. Demo
+- wound_day01.jpg
+- wound_day07.jpg
+- wound_day14.jpg
+- wound_day21.jpg
 
-1. Type `COST`, hit RUN
-2. Watch the 4 agents fire in parallel — cards turn blue (running) then green (done)
-3. Thesis appears: `LONG COST` with predicted SSS, vs-consensus bps, expected moves
-4. Click 🎯 REVEAL → shows the actual Sept 26 2024 earnings result
-5. Mic drop.
+4. Run app:
 
----
+```bash
+cd ..
+./run.sh
+```
 
-## 🧠 Why this actually matters
+5. Open:
 
-This is a real hedge fund strategy. Firms like RS Metrics, Orbital Insight, and Thinknum built $100M+ businesses doing exactly this — counting cars in parking lots from satellites to predict retailer earnings before they're announced.
+- Frontend: http://localhost:3000
+- Backend health: http://localhost:8000
 
-What was a $500K/year data subscription is now a 2-hour hackathon project. That's the story.
+## Architecture
 
----
+All agents run on claude-opus-4-7.
 
-## 🏗️ Architecture
+Dependency graph:
 
-| Agent | Role | Model input |
-|---|---|---|
-| **Vision Analyst** | Counts cars per image, estimates fill rate, flags anomalies | Satellite images + dates |
-| **Digital Demand** | Interprets Google Trends as leading indicator of foot traffic | Weekly search interest YoY/QoQ |
-| **Equity Research** | Synthesizes consensus estimates, price performance, setup | Fundamentals + street notes |
-| **Portfolio Manager** | Reconciles all three signals, generates final thesis | All of the above |
+1. Stage 1: Vision runs first, with all images processed in parallel inside the agent
+2. Stage 2: Trend + Risk run in parallel after vision completes
+3. Stage 3: Care agent synthesizes all prior outputs
 
-All four run on `claude-opus-4-7`. Stages 1-3 are parallelized (`asyncio.gather`). Stage 4 is sequential because it needs the first three outputs.
+Server streaming:
 
----
+- FastAPI /analyze returns Server-Sent Events (SSE)
+- Frontend updates each agent card in real time
+- /reveal/{patient_id} provides the mic-drop actual outcome
 
-## 🎬 Demo script
+## Demo Script
 
-> "Retail hedge funds pay $50k/month for satellite imagery that counts cars at stores. This is what they use it for — predicting earnings beats before they happen. I built a version in 2 hours using four Claude agents.
->
-> Here's Costco — real setup from September 2024. [RUN]
->
-> The Vision Agent counts cars across the quarter — up 28%. Digital Demand sees Google searches for 'Costco' at all-time highs. Fundamentals show the street modeling a conservative +6.5%.
->
-> All three signals agree and they all point ABOVE consensus. The Portfolio Manager calls it: LONG, high conviction, expecting a beat of 40 basis points.
->
-> [REVEAL]
->
-> COST reported on September 26, 2024. Same-store sales: +6.9% versus +6.5% consensus. Our model nailed it. This is what alternative-data hedge funds have been doing since 2010. Claude just democratized it."
+"Diabetic foot ulcers progress to amputation in 14 to 24 percent of cases when infection is caught too late. Wound care nurses are scarce in rural areas. Patients monitor wounds at home with no clinical eyes between appointments.
 
----
+WOUND IQ uses four Claude agents to give caregivers and underserved clinics a clinical-grade second opinion from a phone photo.
 
-## 🔮 What's next
+Here's a real diabetic foot ulcer over 21 days. [RUN]
 
-- Real Google Trends via `pytrends` (live for any ticker)
-- Real fundamentals via `yfinance`
-- Sentinel Hub integration for auto-pulled imagery on new tickers
-- Backtest engine across 20 historical earnings reports
+The Vision Analyst measures dimensions and tissue composition across 4 photos. The Trend Tracker computes the healing trajectory — size shrinking 12%, but granulation tissue dropping. The Risk Engine flags an emerging infection signal on Day 14. The Care Coordinator escalates: URGENT CLINICIAN SAME DAY.
+
+[REVEAL]
+
+This patient developed cellulitis on Day 19, requiring IV antibiotics and a 6-day hospital admission. If our system had been running, the Day 14 escalation would have caught it 5 days earlier — oral antibiotics, no admission, $14,000 saved, amputation risk lowered.
+
+Built in 2 hours with Claude Opus 4.7. Decision support, not diagnosis."
+
+## Demo Data
+
+Default case ID: DEMO-001
+
+Case profile:
+
+- 62-year-old with type 2 diabetes, HbA1c 8.4
+- Diabetic foot ulcer, plantar surface, right foot
+- Peripheral neuropathy + hypertension
+
+Reveal outcome:
+
+- Cellulitis on Day 19, IV antibiotics required
+- Counterfactual with earlier action: fewer hospital days, lower cost, reduced amputation risk
+
+## Notes
+
+- This app is for hackathon demonstration and educational decision support.
+- Do not represent outputs as a medical diagnosis.
