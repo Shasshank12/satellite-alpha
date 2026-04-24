@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Satellite Alpha — Multi-Agent Hedge Fund</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700;800&display=swap');
+  body { font-family: 'Inter', system-ui, sans-serif; background: #0a0a0a; color: #e5e5e5; }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+  .glow-green { box-shadow: 0 0 20px rgba(34, 197, 94, 0.3); }
+  .glow-red { box-shadow: 0 0 20px rgba(239, 68, 68, 0.3); }
+  .glow-blue { box-shadow: 0 0 15px rgba(59, 130, 246, 0.25); }
+  .scanline {
+    background: linear-gradient(90deg, transparent, rgba(59, 130, 246, 0.6), transparent);
+    animation: scan 1.4s linear infinite;
+  }
+  @keyframes scan {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+  }
+  .pulse-dot { animation: pulse-dot 1.2s ease-in-out infinite; }
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 1; }
+  }
+  .fade-in { animation: fadeIn 0.5s ease-out; }
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+const API = "http://localhost:8000";
+
+// ─────────────── UI: Agent card ───────────────
+function AgentCard({ name, title, status, summary }) {
+  const statusColor = {
+    pending: "border-zinc-800 bg-zinc-900/40",
+    running: "border-blue-500/50 bg-blue-500/5 glow-blue",
+    done: "border-emerald-500/50 bg-emerald-500/5",
+    error: "border-red-500/50 bg-red-500/5",
+  }[status];
+
+  const dotColor = {
+    pending: "bg-zinc-600",
+    running: "bg-blue-400 pulse-dot",
+    done: "bg-emerald-400",
+    error: "bg-red-400",
+  }[status];
+
+  return (
+    <div className={`relative overflow-hidden rounded-lg border ${statusColor} p-4 transition-all duration-300`}>
+      {status === "running" && (
+        <div className="absolute inset-x-0 top-0 h-0.5">
+          <div className="scanline h-full w-full" />
+        </div>
+      )}
+      <div className="flex items-center gap-3 mb-2">
+        <div className={`h-2 w-2 rounded-full ${dotColor}`} />
+        <span className="mono text-xs text-zinc-500 uppercase tracking-wider">{name}</span>
+      </div>
+      <div className="font-semibold text-zinc-100 mb-1">{title}</div>
+      <div className="text-sm text-zinc-400 min-h-[1.25rem]">
+        {status === "pending" && "awaiting orchestrator…"}
+        {status === "running" && "analyzing…"}
+        {status === "done" && summary}
+        {status === "error" && "failed"}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────── UI: Signal result panels ───────────────
+function VisionPanel({ data }) {
+  if (!data) return null;
+  const totalCars = data.reduce((s, d) => s + d.car_count, 0);
+  const avgFill = (data.reduce((s, d) => s + d.fill_rate, 0) / data.length * 100).toFixed(0);
+  return (
+    <div className="fade-in space-y-3">
+      <div className="flex gap-4 mono text-xs">
+        <div><span className="text-zinc-500">cars observed:</span> <span className="text-emerald-400">{totalCars}</span></div>
+        <div><span className="text-zinc-500">avg fill rate:</span> <span className="text-emerald-400">{avgFill}%</span></div>
+      </div>
+      <div className="grid grid-cols-4 gap-2">
+        {data.map((d, i) => (
+          <div key={i} className="rounded border border-zinc-800 bg-zinc-950/60 p-2">
+            <div className="mono text-[10px] text-zinc-500 mb-1">{d.date.split("(")[0].trim()}</div>
+            <div className="text-2xl font-bold text-emerald-400">{d.car_count}</div>
+            <div className="mono text-[10px] text-zinc-600">{(d.fill_rate * 100).toFixed(0)}% fill</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TrendsPanel({ data }) {
+  if (!data) return null;
+  const dir = data.trend_direction;
+  const color = dir === "rising" ? "text-emerald-400" : dir === "declining" ? "text-red-400" : "text-amber-400";
+  return (
+    <div className="fade-in space-y-2 text-sm">
+      <div><span className="text-zinc-500">direction:</span> <span className={`uppercase mono ${color}`}>{dir}</span></div>
+      <div><span className="text-zinc-500">YoY:</span> <span className={color}>{data.yoy_change_pct > 0 ? "+" : ""}{data.yoy_change_pct}%</span></div>
+      <div><span className="text-zinc-500">QoQ:</span> <span className={color}>{data.qoq_change_pct > 0 ? "+" : ""}{data.qoq_change_pct}%</span></div>
+      <div className="text-zinc-400 italic text-xs mt-2">"{data.interpretation}"</div>
+    </div>
+  );
+}
+
+function ContextPanel({ data }) {
+  if (!data) return null;
+  return (
+    <div className="fade-in space-y-2 text-sm">
+      <div><span className="text-zinc-500">street expects SSS:</span> <span className="text-amber-400">+{data.consensus_ss_sales_growth_pct}%</span></div>
+      <div><span className="text-zinc-500">implied move:</span> <span className="mono">±{data.implied_move_pct}%</span></div>
+      <div><span className="text-zinc-500">setup:</span> <span className="mono uppercase">{data.setup}</span></div>
+      <div className="text-xs text-zinc-500 mt-2">bull: <span className="text-zinc-300">{data.bull_points?.[0]}</span></div>
+      <div className="text-xs text-zinc-500">bear: <span className="text-zinc-300">{data.bear_points?.[0]}</span></div>
+    </div>
+  );
+}
+
+// ─────────────── UI: Final thesis card ───────────────
+function ThesisCard({ thesis }) {
+  if (!thesis) return null;
+  const isLong = thesis.direction === "LONG";
+  const isShort = thesis.direction === "SHORT";
+  const dirClass = isLong
+    ? "border-emerald-500 bg-emerald-500/10 glow-green"
+    : isShort
+    ? "border-red-500 bg-red-500/10 glow-red"
+    : "border-amber-500 bg-amber-500/10";
+
+  return (
+    <div className={`fade-in rounded-xl border-2 ${dirClass} p-6`}>
+      <div className="flex items-start justify-between mb-4">
+        <div>
+          <div className="mono text-xs text-zinc-500 uppercase tracking-widest mb-1">trade thesis</div>
+          <div className="text-3xl font-extrabold">
+            <span className={isLong ? "text-emerald-400" : isShort ? "text-red-400" : "text-amber-400"}>
+              {thesis.direction}
+            </span>
+            <span className="text-zinc-300"> {thesis.ticker}</span>
+          </div>
+        </div>
+        <div className="text-right">
+          <div className="mono text-xs text-zinc-500">conviction</div>
+          <div className="font-bold text-xl">{thesis.conviction}</div>
+        </div>
+      </div>
+
+      <div className="text-zinc-200 leading-relaxed mb-6">{thesis.thesis}</div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+        <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
+          <div className="mono text-[10px] text-zinc-500 uppercase mb-1">our SSS forecast</div>
+          <div className="text-xl font-bold text-emerald-400">+{thesis.predicted_ss_sales_growth_pct}%</div>
+        </div>
+        <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
+          <div className="mono text-[10px] text-zinc-500 uppercase mb-1">vs consensus</div>
+          <div className={`text-xl font-bold ${thesis.vs_consensus_bps >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+            {thesis.vs_consensus_bps >= 0 ? "+" : ""}{thesis.vs_consensus_bps} bps
+          </div>
+        </div>
+        <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
+          <div className="mono text-[10px] text-zinc-500 uppercase mb-1">expected move / beat</div>
+          <div className="text-xl font-bold text-emerald-400">+{thesis.expected_stock_move_on_beat_pct}%</div>
+        </div>
+        <div className="rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
+          <div className="mono text-[10px] text-zinc-500 uppercase mb-1">expected move / miss</div>
+          <div className="text-xl font-bold text-red-400">{thesis.expected_stock_move_on_miss_pct}%</div>
+        </div>
+      </div>
+
+      <div className="mb-4">
+        <div className="mono text-xs text-zinc-500 uppercase mb-2">signal attribution</div>
+        <div className="space-y-1.5">
+          {thesis.citations?.map((c, i) => (
+            <div key={i} className="flex gap-3 text-sm">
+              <span className="mono text-[10px] uppercase text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded whitespace-nowrap h-fit mt-0.5">{c.signal}</span>
+              <span className="text-zinc-300">{c.claim}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between border-t border-zinc-800 pt-3 text-xs">
+        <div><span className="text-zinc-500">signal agreement:</span> <span className="mono text-zinc-300">{thesis.signal_agreement}</span></div>
+        <div><span className="text-zinc-500">alpha source:</span> <span className="mono text-zinc-300">{thesis.alpha_source}</span></div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────── UI: Reveal (mic drop) ───────────────
+function RevealCard({ outcome }) {
+  if (!outcome) return null;
+  const beat = outcome.beat_consensus_sss && outcome.beat_consensus_eps;
+  return (
+    <div className="fade-in rounded-xl border-2 border-amber-500/70 bg-gradient-to-br from-amber-500/10 to-orange-500/5 p-6 mt-6">
+      <div className="mono text-xs uppercase tracking-widest text-amber-400 mb-2">what actually happened</div>
+      <div className="grid grid-cols-3 gap-4 mb-4">
+        <div>
+          <div className="mono text-[10px] text-zinc-500 uppercase mb-1">reported SSS</div>
+          <div className="text-2xl font-bold">+{outcome.reported_ss_sales_growth_pct}%</div>
+        </div>
+        <div>
+          <div className="mono text-[10px] text-zinc-500 uppercase mb-1">reported EPS</div>
+          <div className="text-2xl font-bold">${outcome.reported_eps}</div>
+        </div>
+        <div>
+          <div className="mono text-[10px] text-zinc-500 uppercase mb-1">vs consensus</div>
+          <div className={`text-2xl font-bold ${beat ? "text-emerald-400" : "text-red-400"}`}>
+            {beat ? "BEAT" : "MISS"}
+          </div>
+        </div>
+      </div>
+      <div className="text-sm text-zinc-300 leading-relaxed">{outcome.note}</div>
+    </div>
+  );
+}
+
+// ─────────────── Main app ───────────────
+function App() {
+  const [ticker, setTicker] = useState("COST");
+  const [running, setRunning] = useState(false);
+  const [agents, setAgents] = useState({
+    vision:      { status: "pending", data: null },
+    trends:      { status: "pending", data: null },
+    context:     { status: "pending", data: null },
+    synthesizer: { status: "pending", data: null },
+  });
+  const [thesis, setThesis] = useState(null);
+  const [outcome, setOutcome] = useState(null);
+
+  const run = async () => {
+    setRunning(true);
+    setThesis(null);
+    setOutcome(null);
+    setAgents({
+      vision:      { status: "pending", data: null },
+      trends:      { status: "pending", data: null },
+      context:     { status: "pending", data: null },
+      synthesizer: { status: "pending", data: null },
+    });
+
+    const form = new FormData();
+    form.append("ticker", ticker);
+    form.append("use_demo", "true");
+
+    const res = await fetch(`${API}/analyze`, { method: "POST", body: form });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const update = JSON.parse(line.slice(6));
+
+        if (update.step === "start") continue;
+
+        if (update.step === "complete") {
+          setThesis(update.data.thesis);
+          setRunning(false);
+          continue;
+        }
+
+        setAgents(prev => ({
+          ...prev,
+          [update.step]: { status: update.status, data: update.data },
+        }));
+      }
+    }
+  };
+
+  const reveal = async () => {
+    const res = await fetch(`${API}/reveal/${ticker}`);
+    setOutcome(await res.json());
+  };
+
+  return (
+    <div className="min-h-screen p-6 max-w-7xl mx-auto">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-8 pb-4 border-b border-zinc-800">
+        <div>
+          <div className="flex items-center gap-3 mb-1">
+            <div className="mono text-xs uppercase tracking-widest text-emerald-400">◉ live</div>
+            <h1 className="text-2xl font-extrabold tracking-tight">SATELLITE ALPHA</h1>
+          </div>
+          <div className="mono text-xs text-zinc-500">
+            multi-agent alternative data → equity thesis · claude opus 4.7
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <input
+            value={ticker}
+            onChange={(e) => setTicker(e.target.value.toUpperCase())}
+            className="mono bg-zinc-900 border border-zinc-700 rounded px-3 py-2 w-24 text-center font-bold"
+          />
+          <button
+            onClick={run}
+            disabled={running}
+            className="bg-emerald-500 hover:bg-emerald-400 disabled:bg-zinc-700 disabled:text-zinc-500 text-black font-bold px-5 py-2 rounded transition-colors"
+          >
+            {running ? "ANALYZING…" : "▶ RUN PIPELINE"}
+          </button>
+        </div>
+      </div>
+
+      {/* Agent grid */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-6">
+        <AgentCard
+          name="agent-01" title="Vision Analyst" status={agents.vision.status}
+          summary={agents.vision.data ? `${agents.vision.data.reduce((s,d)=>s+d.car_count,0)} cars across ${agents.vision.data.length} scans` : ""}
+        />
+        <AgentCard
+          name="agent-02" title="Digital Demand" status={agents.trends.status}
+          summary={agents.trends.data ? `${agents.trends.data.trend_direction.toUpperCase()} · YoY ${agents.trends.data.yoy_change_pct > 0 ? "+" : ""}${agents.trends.data.yoy_change_pct}%` : ""}
+        />
+        <AgentCard
+          name="agent-03" title="Equity Research" status={agents.context.status}
+          summary={agents.context.data ? `street: +${agents.context.data.consensus_ss_sales_growth_pct}% · ${agents.context.data.setup}` : ""}
+        />
+        <AgentCard
+          name="agent-04" title="Portfolio Manager" status={agents.synthesizer.status}
+          summary={agents.synthesizer.data ? `thesis ready` : ""}
+        />
+      </div>
+
+      {/* Signal detail panels */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-8">
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900/30 p-4">
+          <div className="mono text-xs text-zinc-500 uppercase mb-3">vision</div>
+          <VisionPanel data={agents.vision.data} />
+        </div>
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900/30 p-4">
+          <div className="mono text-xs text-zinc-500 uppercase mb-3">trends</div>
+          <TrendsPanel data={agents.trends.data} />
+        </div>
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900/30 p-4">
+          <div className="mono text-xs text-zinc-500 uppercase mb-3">fundamentals</div>
+          <ContextPanel data={agents.context.data} />
+        </div>
+      </div>
+
+      {/* Thesis */}
+      {thesis && (
+        <>
+          <ThesisCard thesis={thesis} />
+          {!outcome && (
+            <div className="text-center mt-6">
+              <button
+                onClick={reveal}
+                className="bg-amber-500 hover:bg-amber-400 text-black font-bold px-6 py-3 rounded transition-colors"
+              >
+                🎯 reveal actual outcome
+              </button>
+            </div>
+          )}
+          <RevealCard outcome={outcome} />
+        </>
+      )}
+
+      {/* Empty state */}
+      {!thesis && !running && (
+        <div className="text-center py-16 text-zinc-600">
+          <div className="text-5xl mb-4">🛰️</div>
+          <div className="mono text-xs uppercase tracking-widest mb-2">pipeline idle</div>
+          <div className="text-sm">enter a ticker and run the analysis</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
