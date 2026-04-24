@@ -15,6 +15,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from anthropic import AsyncAnthropic
+from demo_data import DEMO_MODE, WOUND_PACKAGE
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
@@ -310,6 +311,37 @@ async def run_pipeline(
     async def report(step: str, status: str, data=None):
         if progress_callback:
             await progress_callback({"step": step, "status": status, "data": data})
+
+    if DEMO_MODE:
+        # Bulletproof demo path: cached payloads + realistic staged latency.
+        await report("vision", "running")
+        await asyncio.sleep(6)
+        vision_results = WOUND_PACKAGE["cached_vision"]
+        await report("vision", "done", vision_results)
+
+        await report("trend", "running")
+        await report("risk", "running")
+        await asyncio.sleep(8)
+        trend_result = WOUND_PACKAGE["cached_trend"]
+        risk_result = WOUND_PACKAGE["cached_risk"]
+        await report("trend", "done", trend_result)
+        await asyncio.sleep(0.4)
+        await report("risk", "done", risk_result)
+
+        await report("care", "running")
+        await asyncio.sleep(6)
+        care = WOUND_PACKAGE["cached_care"]
+        await report("care", "done", care)
+
+        return {
+            "patient_id": patient_id,
+            "wound_type": wound_type,
+            "patient_context": patient_context,
+            "vision": vision_results,
+            "trend": trend_result,
+            "risk": risk_result,
+            "care": care,
+        }
 
     # Stage 1: Vision over all images (parallel per-image within agent)
     await report("vision", "running")
